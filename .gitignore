@@ -6,3 +6,8 @@ cookies.txt
 
 __pycache__/
 *.pyc
+webui_config.json
+
+# local temp / probe output -- may contain credentials
+*.txt
+cred*

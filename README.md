@@ -38,7 +38,21 @@ Fantia hides members-only posts; `/api/v1/posts/<id>` answers HTTP 422 for anyth
 
 Without any cookie only genuinely public posts will scrape.
 
-## Batch scraping
+## WebUI (optional)
+
+`webui.py` is a zero-dependency (stdlib-only) local front-end for batch scraping:
+
+```
+python webui.py          # then open http://127.0.0.1:8799
+```
+
+- Paste one URL / post id / `FANTIA-<id>` filename per line → batch scrape → result cards (cover, date, tags, performers, details) → export JSON
+- **CookieCloud & proxy settings are editable in the browser** — no env vars needed. They are stored in `webui_config.json` next to the script (gitignored, never leaves the machine) and applied hot. CookieCloud requests always bypass the proxy; the proxy only applies to fantia.jp traffic.
+- Cookie cache status + one-click clear.
+
+`WEBUI_HOST` / `WEBUI_PORT` env vars override the bind address (default `127.0.0.1:8799`).
+
+## Batch scraping in Stash
 
 - **Scenes/Galleries**: multi-select in the grid → **Scrape with… → FantiaJp**.
 - Post IDs are resolved from the fragment in this order: existing `fantia.jp/posts/<id>` URL → previously scraped `FANTIA-<id>` code → digits in the filename. Scenes without any of these are skipped silently.
