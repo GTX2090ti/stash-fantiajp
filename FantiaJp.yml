@@ -1,0 +1,33 @@
+name: FantiaJp
+sceneByURL:
+  - action: script
+    url:
+      - fantia.jp/posts/
+    script:
+      - python
+      - fantiajp.py
+      - post
+galleryByURL:
+  - action: script
+    url:
+      - fantia.jp/posts/
+    script:
+      - python
+      - fantiajp.py
+      - post
+# Upstream FantiaJp stops here -- and that is exactly why it never showed up
+# in the "Scrape with ..." menu: that menu only lists scrapers whose
+# supported_scrapes include FRAGMENT.  The two blocks below add it.
+sceneByFragment:
+  action: script
+  script:
+    - python
+    - fantiajp.py
+    - sceneByFragment
+galleryByFragment:
+  action: script
+  script:
+    - python
+    - fantiajp.py
+    - galleryByFragment
+# Last Updated September 12, 2026 (fragment support + CookieCloud)

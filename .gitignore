@@ -1,0 +1,8 @@
+# Cookie caches and local credentials -- never commit
+.fantia_cookiecc.json
+fantia_cookie.txt
+cookies.txt
+*.log
+
+__pycache__/
+*.pyc

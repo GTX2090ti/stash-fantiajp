@@ -1,0 +1,10 @@
+id: FantiaJp
+name: FantiaJp
+metadata: {}
+version: b59e842d
+date: "2024-05-22 14:24:59"
+requires: []
+source_repository: https://stashapp.github.io/CommunityScrapers/stable/index.yml
+files:
+- FantiaJp.yml
+- fantiajp.py
