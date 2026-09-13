@@ -52,6 +52,35 @@ python webui.py          # then open http://127.0.0.1:8799
 
 `WEBUI_HOST` / `WEBUI_PORT` env vars override the bind address (default `127.0.0.1:8799`).
 
+### Run it next to your Stash (NAS / Docker)
+
+The WebUI can share the scraper directory with your Stash container — it then reuses the same `fantiajp.py`, cookie cache and (if present) baked-in defaults:
+
+```bash
+mkdir -p /vol2/docker/fantia-webui && cd /vol2/docker/fantia-webui
+cat > Dockerfile <<'EOF'
+FROM python:3.12-alpine
+WORKDIR /app
+ARG PROXY
+ENV HTTPS_PROXY=${PROXY} HTTP_PROXY=${PROXY}
+RUN pip install --no-cache-dir requests
+ENV WEBUI_HOST=0.0.0.0 WEBUI_PORT=8799
+CMD ["python3", "webui.py"]
+EOF
+docker build --build-arg PROXY=http://your-proxy:7890 -t fantia-webui:latest .
+
+docker run -d --name fantia-webui --restart unless-stopped --network host \
+  -v /path/to/stash/scrapers/community/FantiaJp:/app \
+  -e HTTPS_PROXY=http://your-proxy:7890 -e HTTP_PROXY=http://your-proxy:7890 \
+  fantia-webui:latest
+```
+
+Then open `http://<nas-ip>:8799`. Notes:
+
+- `--network host` exposes 8799 on the LAN directly; keep the NAS off the public internet.
+- CookieCloud settings left empty in the UI fall back to whatever `fantiajp.py` itself carries (env vars or baked defaults), so a private build keeps working with zero UI configuration.
+- Settings saved in the UI land in `webui_config.json` inside the mounted scraper dir.
+
 ## Batch scraping in Stash
 
 - **Scenes/Galleries**: multi-select in the grid → **Scrape with… → FantiaJp**.

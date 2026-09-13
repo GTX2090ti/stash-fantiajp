@@ -49,6 +49,12 @@ _lock = threading.Lock()
 
 def load_config():
     cfg = dict(DEFAULTS)
+    # fall back to the defaults baked into fantiajp.py (env vars are read at
+    # its import time) -- e.g. a private NAS build may ship CC defaults there
+    for k, v in (("cc_url", fantiajp.CC_URL), ("cc_key", fantiajp.CC_KEY),
+                 ("cc_password", fantiajp.CC_PASSWORD)):
+        if v:
+            cfg[k] = v
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as fh:
@@ -70,11 +76,10 @@ def apply_config(cfg):
     fantiajp.CC_KEY = cfg["cc_key"]
     fantiajp.CC_PASSWORD = cfg["cc_password"]
     if cfg["proxy"]:
+        # empty setting = keep whatever the host/container already exports
+        # (e.g. the Stash-style container proxy), so we never clear it here
         os.environ["HTTPS_PROXY"] = cfg["proxy"]
         os.environ["HTTP_PROXY"] = cfg["proxy"]
-    else:
-        os.environ.pop("HTTPS_PROXY", None)
-        os.environ.pop("HTTP_PROXY", None)
 
 
 def cache_info():
@@ -96,7 +101,7 @@ def status_payload(cfg):
                               and cfg["cc_password"]),
         "cc_url_masked": (cfg["cc_url"] or "") + "  key:***"
                          if cfg["cc_key"] else "",
-        "proxy": cfg["proxy"],
+        "proxy": cfg["proxy"] or os.environ.get("HTTPS_PROXY", ""),
         "cache": ci,
         "port": cfg["port"],
     }
