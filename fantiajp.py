@@ -54,6 +54,7 @@ Debug: set ``FANTIA_DEBUG=1`` to get stderr traces.
 import hashlib
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -75,6 +76,13 @@ except Exception:  # noqa: BLE001
 NAME = "FantiaJp"
 DEBUG = os.environ.get("FANTIA_DEBUG") == "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Retry policy for transient failures (batch scraping hits Fantia hard).
+# RETRIES extra attempts for network errors / 429 / 5xx; 403 gets exactly
+# one retry (it may be throttling, or a permanently bad cookie -- don't
+# double every item's latency in the bad-cookie case).  422 never retries.
+RETRIES = int(os.environ.get("FANTIA_RETRIES", "2"))
+BACKOFF = float(os.environ.get("FANTIA_BACKOFF", "1.0"))  # seconds, exponential
 
 BASE = "https://fantia.jp"
 POST_URL = BASE + "/posts/%s"
@@ -502,7 +510,12 @@ def get_csrf(sess):
 
 
 def fetch_post(sess, post_id, csrf):
-    """GET the private JSON API. Returns (post_dict|None, message)."""
+    """GET the private JSON API. Returns (post_dict|None, message).
+
+    Transient failures -- network errors, HTTP 429 / 5xx, and the first
+    403 (which may just be throttling) -- are retried with exponential
+    backoff + jitter.  422 is permanent (not visible) and never retried.
+    """
     headers = {
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "X-Requested-With": "XMLHttpRequest",
@@ -510,27 +523,43 @@ def fetch_post(sess, post_id, csrf):
     }
     if csrf:
         headers["X-CSRF-Token"] = csrf
-    try:
-        r = sess.get(API_URL % post_id, headers=headers, timeout=15,
-                     verify=False)
-    except requests.RequestException as e:
-        return None, "request failed: %s" % e
-    if r.status_code == 422:
-        return None, ("HTTP 422: post %s is not visible to this session "
-                      "(deleted, members-only, or not logged in -- Fantia does "
-                      "not distinguish)" % post_id)
-    if r.status_code == 403:
-        return None, "HTTP 403: blocked (invalid cookie or IP throttled)"
-    if r.status_code != 200:
-        return None, "HTTP %s" % r.status_code
-    try:
-        data = r.json()
-    except ValueError:
-        return None, "response was not JSON"
-    post = data.get("post")
-    if not isinstance(post, dict):
-        return None, "JSON contained no 'post' object"
-    return post, ""
+    attempts = 1 + max(0, RETRIES)
+    last = "unreachable"
+    for attempt in range(attempts):
+        if attempt:
+            delay = BACKOFF * (2 ** (attempt - 1)) + random.uniform(0, 0.4)
+            dbg("retry %d/%d for post %s in %.1fs (%s)"
+                % (attempt, RETRIES, post_id, delay, last))
+            time.sleep(delay)
+        try:
+            r = sess.get(API_URL % post_id, headers=headers, timeout=15,
+                         verify=False)
+        except requests.RequestException as e:
+            last = "request failed: %s" % e
+            continue
+        if r.status_code == 422:
+            return None, ("HTTP 422: post %s is not visible to this session "
+                          "(deleted, members-only, or not logged in -- Fantia "
+                          "does not distinguish)" % post_id)
+        if r.status_code == 403:
+            if attempt == 0:  # one retry: throttling heals, a bad cookie won't
+                last = "HTTP 403: blocked (invalid cookie or IP throttled)"
+                continue
+            return None, last
+        if r.status_code == 429 or r.status_code >= 500:
+            last = "HTTP %s" % r.status_code
+            continue
+        if r.status_code != 200:
+            return None, "HTTP %s" % r.status_code
+        try:
+            data = r.json()
+        except ValueError:
+            return None, "response was not JSON"
+        post = data.get("post")
+        if not isinstance(post, dict):
+            return None, "JSON contained no 'post' object"
+        return post, ""
+    return None, last
 
 
 # --------------------------------------------------------------------------- #

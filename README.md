@@ -93,6 +93,8 @@ python webui.py          # then open http://127.0.0.1:8799
 Features:
 
 - Paste one item per line — post URL / numeric ID / `FANTIA-<id>` filename → batch scrape → result cards (cover, date, tags, performers, details) → export JSON
+- **Concurrent batch engine**: 1–8 workers (default 3) with adaptive rate limiting — the request interval doubles on 403/429/network errors (cap 8 s) and decays back after 5 consecutive successes; duplicates are detected and skipped before any request fires
+- **Live progress**: results stream in as they complete (no waiting for the whole batch); jobs can be cancelled mid-run
 - **CookieCloud & proxy settings are editable in the browser** — no env vars needed. Saved to `webui_config.json` next to the script (gitignored, never leaves the machine) and applied hot
 - Cookie cache status + one-click clear
 
@@ -138,6 +140,8 @@ All env vars, read where the respective process runs:
 |---|---|---|---|
 | `FANTIA_COOKIE` | scraper | — | Raw session cookie (highest cookie priority) |
 | `FANTIA_DEBUG` | scraper | off | `1` = stderr diagnostics |
+| `FANTIA_RETRIES` | scraper | `2` | Extra attempts for transient failures (network / 429 / 5xx; 403 gets one) |
+| `FANTIA_BACKOFF` | scraper | `1.0` | Base delay (s) between retries, exponential |
 | `CC_COOKIECLOUD_URL` | scraper | — | CookieCloud base URL |
 | `CC_COOKIECLOUD_KEY` | scraper | — | Device key (UUID) |
 | `CC_COOKIECLOUD_PASSWORD` | scraper | — | Sync password |
@@ -171,6 +175,7 @@ All env vars, read where the respective process runs:
 
 ## Changelog
 
+- **2026-09-13 (2)** — Batch scraping optimization: retry with exponential backoff for transient failures in the scraper core; WebUI batch engine rewritten — concurrent workers, adaptive rate limiting, live progress + cancel, duplicate-line dedup.
 - **2026-09-13** — WebUI added (batch scrape, in-browser CookieCloud settings, JSON export); NAS Docker deployment guide; WebUI inherits scraper's baked-in defaults when UI config is empty.
 - **2026-09-12** — Fixed crash on dict-shaped `thumb`/`title` fields (the `EOF` bug); `_s()` tolerant getter across all string fields; regression suite grown to 92 assertions.
 - **2026-09-11** — Initial fragment-capable build: `sceneByFragment`/`galleryByFragment`, CookieCloud client with AES fallback and 1 h cache.

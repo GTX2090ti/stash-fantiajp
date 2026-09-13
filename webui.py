@@ -12,6 +12,9 @@ Features
 --------
 * paste one URL/id per line -> batch scrape -> result cards (cover, tags,
   performers, details) -> export JSON
+* batch engine: concurrent workers (1-8), adaptive rate limiting
+  (interval doubles on 403/429, decays back after 5 successes),
+  live progress via polling, cancel button, duplicate-line dedup
 * CookieCloud settings editable in the browser (stored in webui_config.json
   next to this script -- gitignored, never leaves the machine)
 * cookie cache status + one-click clear
@@ -26,6 +29,8 @@ import os
 import sys
 import threading
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,10 +47,9 @@ DEFAULTS = {
     "proxy": "",        # e.g. http://192.168.2.210:7890 ; empty = direct
     "host": "127.0.0.1",
     "port": 8799,
+    "workers": 3,       # concurrent scrape threads (1-8)
+    "interval": 0.6,    # base min interval between fantia requests (s)
 }
-
-_lock = threading.Lock()
-
 
 def load_config():
     cfg = dict(DEFAULTS)
@@ -104,6 +108,8 @@ def status_payload(cfg):
         "proxy": cfg["proxy"] or os.environ.get("HTTPS_PROXY", ""),
         "cache": ci,
         "port": cfg["port"],
+        "workers": cfg["workers"],
+        "interval": cfg["interval"],
     }
 
 
@@ -126,28 +132,162 @@ def resolve_post_id(text):
     return None
 
 
-def scrape_batch(items):
-    results = []
-    sess = fantiajp.new_session()
-    csrf = []
+class RateLimiter:
+    """Global pacer for fantia requests with adaptive throttling.
+
+    `wait()` blocks until the next slot.  A transient failure (403/429/
+    network) doubles the interval (cap 8 s); after 5 consecutive successes
+    the interval decays halfway back toward the configured base.
+    """
+
+    CAP = 8.0
+
+    def __init__(self, base):
+        self.base = max(0.05, float(base))
+        self.cur = self.base
+        self._next = 0.0
+        self._lock = threading.Lock()
+        self._streak = 0
+
+    def wait(self):
+        with self._lock:
+            now = time.time()
+            slot = max(self._next, now)
+            self._next = slot + self.cur
+        delay = slot - time.time()
+        if delay > 0:
+            time.sleep(delay)
+
+    def penalize(self):
+        with self._lock:
+            self.cur = min(self.CAP, max(self.cur * 2, self.base * 2))
+            self._streak = 0
+
+    def reward(self):
+        with self._lock:
+            self._streak += 1
+            if self._streak >= 5 and self.cur > self.base:
+                self.cur = max(self.base, self.cur / 2)
+                self._streak = 0
+
+
+def _transient(msg):
+    if not msg:
+        return False
+    return ("request failed" in msg or "HTTP 403" in msg
+            or "HTTP 429" in msg or "HTTP 5" in msg)
+
+
+# --------------------------------------------------------------------------- #
+# Batch job engine: concurrent, rate-limited, cancellable, resumable via polling
+# --------------------------------------------------------------------------- #
+JOBS = {}           # job_id -> state dict
+JOBS_LOCK = threading.Lock()
+MAX_ITEMS = 500
+
+
+def parse_items(items):
+    """Resolve lines -> [(raw, pid_or_None)]; dedupe post ids, keep order."""
+    seen, dups = set(), 0
+    out = []
     for raw in items:
         pid = resolve_post_id(raw)
-        if not pid:
-            results.append({"input": raw, "ok": False,
-                            "error": "no fantia post id found"})
+        if pid and pid in seen:
+            dups += 1
+            out.append((raw, None, "duplicate of an earlier line, skipped"))
             continue
+        if pid:
+            seen.add(pid)
+        out.append((raw, pid, None))
+    return out, dups
+
+
+def start_job(items, cfg):
+    parsed, dups = parse_items(items[:MAX_ITEMS])
+    jid = uuid.uuid4().hex[:12]
+    job = {
+        "id": jid, "state": "running", "total": len(parsed), "done": 0,
+        "ok": 0, "fail": 0, "dups": dups, "cancel": False,
+        "results": [None] * len(parsed), "started": time.time(),
+    }
+    with JOBS_LOCK:
+        # keep only the 4 most recent jobs around
+        for old in sorted(JOBS, key=lambda k: JOBS[k]["started"])[:-4]:
+            JOBS.pop(old, None)
+        JOBS[jid] = job
+    threading.Thread(target=run_job, args=(job, parsed, cfg),
+                     daemon=True).start()
+    return job
+
+
+def run_job(job, parsed, cfg):
+    limiter = RateLimiter(cfg["interval"])
+    workers = max(1, min(8, int(cfg["workers"])))
+    tl = threading.local()          # per-thread session (cookie jar safety)
+
+    def get_sess():
+        if getattr(tl, "sess", None) is None:
+            tl.sess = fantiajp.new_session()
+            tl.csrf = fantiajp.get_csrf(tl.sess)
+        return tl.sess, tl.csrf
+
+    def one(idx, raw, pid):
+        if job["cancel"]:
+            return
+        rec = {"idx": idx, "input": raw, "ok": False, "post_id": pid,
+               "error": None}
         try:
-            frag = fantiajp.scrape_id(pid, sess, csrf)
-            results.append({"input": raw, "ok": bool(frag),
-                            "post_id": pid,
-                            "error": None if frag else
-                            "scraped empty (not visible / throttled?)",
-                            "data": frag})
+            sess, csrf = get_sess()
+            limiter.wait()
+            frag = fantiajp.scrape_id(pid, sess, [csrf])
+            rec["ok"] = bool(frag)
+            rec["data"] = frag
+            rec["error"] = None if frag else \
+                "scraped empty (not visible / throttled?)"
         except Exception as e:  # noqa: BLE001
-            results.append({"input": raw, "ok": False, "post_id": pid,
-                            "error": "%s: %s" % (type(e).__name__, e)})
-        time.sleep(0.3)  # be gentle with fantia
-    return results
+            rec["error"] = "%s: %s" % (type(e).__name__, e)
+        if _transient(rec["error"]):
+            limiter.penalize()
+        else:
+            limiter.reward()
+        finish(rec)
+
+    def finish(rec):
+        job["results"][rec["idx"]] = rec
+        job["done"] += 1
+        if rec["ok"]:
+            job["ok"] += 1
+        else:
+            job["fail"] += 1
+
+    # pre-fill non-resolvable lines so progress counts them immediately
+    for idx, (raw, pid, err) in enumerate(parsed):
+        if err or not pid:
+            job["results"][idx] = {"idx": idx, "input": raw, "ok": False,
+                                   "post_id": None, "error":
+                                   err or "no fantia post id found"}
+    job["done"] = sum(1 for r in job["results"] if r is not None)
+    job["fail"] = job["done"]
+
+    todo = [(i, raw, pid) for i, (raw, pid, _e) in enumerate(parsed) if pid]
+    if todo:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(one, i, raw, pid) for i, raw, pid in todo]
+            for f in futs:
+                f.result()
+    job["state"] = "cancelled" if job["cancel"] else "done"
+    job["finished"] = time.time()
+
+
+def job_payload(job):
+    with JOBS_LOCK:
+        results = [r for r in job["results"] if r is not None]
+        return {"id": job["id"], "state": job["state"],
+                "total": job["total"], "done": job["done"],
+                "ok": job["ok"], "fail": job["fail"], "dups": job["dups"],
+                "elapsed": round((job.get("finished") or time.time())
+                                 - job["started"], 1),
+                "results": results}
 
 
 PAGE = """<!DOCTYPE html>
@@ -220,6 +360,7 @@ border-top-color:transparent;border-radius:50%;animation:sp .8s linear infinite}
 <textarea id="inp" placeholder="每行一个：帖子 URL、纯数字 ID 或含 ID 的文件名&#10;https://fantia.jp/posts/1180318&#10;1180318&#10;FANTIA-976153.mp4"></textarea>
 <div class="row">
 <button onclick="go()"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>开始刮削</button>
+<button class="ghost" id="btnCancel" style="display:none" onclick="cancelJob()"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.4" fill="none"/></svg>停止</button>
 <button class="ghost" onclick="clearCache()">清除 cookie 缓存</button>
 <button class="ghost" onclick="dlJson()">导出 JSON</button>
 <span id="st">加载中…</span>
@@ -234,11 +375,13 @@ border-top-color:transparent;border-radius:50%;animation:sp .8s linear infinite}
 <div class="set"><label>KEY (UUID)</label><input id="c_key"></div>
 <div class="set"><label>同步密码</label><input id="c_pwd" type="password"></div>
 <div class="set"><label>出站代理</label><input id="c_proxy" placeholder="http://192.168.2.210:7890（留空 = 直连）"></div>
-<div class="row"><button onclick="saveCfg()">保存</button><span class="hint">保存在本目录 webui_config.json（已被 gitignore，不入仓库）。CookieCloud 请求始终绕过代理；代理只用于访问 fantia.jp。</span></div>
+<div class="set"><label>并发数</label><input id="c_workers" type="number" min="1" max="8" step="1" placeholder="3（1-8）"></div>
+<div class="set"><label>请求间隔 (秒)</label><input id="c_interval" type="number" min="0.1" max="5" step="0.1" placeholder="0.6（被限流时自动加倍）"></div>
+<div class="row"><button onclick="saveCfg()">保存</button><span class="hint">保存在本目录 webui_config.json（已被 gitignore，不入仓库）。CookieCloud 请求始终绕过代理；代理只用于访问 fantia.jp。遇到 403/429 间隔自动翻倍，连续成功后逐步回落。</span></div>
 </div>
 </div>
 <script>
-let CFG={}, LAST=[];
+let CFG={}, LAST=[], CURJOB=null, POLLT=null, RENDERED=new Set();
 const $=id=>document.getElementById(id);
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 async function status(){try{
@@ -251,27 +394,50 @@ async function status(){try{
 }catch(e){$('st').innerHTML='<b class="err">状态获取失败</b>'}}
 async function loadCfg(){const c=await (await fetch('/api/config_view')).json();
   $('c_url').value=c.cc_url||'';$('c_key').value=c.cc_key||'';$('c_pwd').value=c.cc_password||'';
+  $('c_workers').value=c.workers||3;$('c_interval').value=c.interval||0.6;
   const s=await (await fetch('/api/status')).json();$('c_proxy').value=s.proxy||'';}
 function openSettings(){$('setcard').style.display=$('setcard').style.display==='none'?'block':'none'}
 async function saveCfg(){const body={cc_url:$('c_url').value.trim(),cc_key:$('c_key').value.trim(),
-  cc_password:$('c_pwd').value,proxy:$('c_proxy').value.trim()};
+  cc_password:$('c_pwd').value,proxy:$('c_proxy').value.trim(),
+  workers:+$('c_workers').value||3,interval:+$('c_interval').value||0.6};
   await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   await status();openSettings()}
 async function clearCache(){await fetch('/api/cache/clear',{method:'POST'});await status()}
 async function go(){
   const items=$('inp').value.split('\\n').map(s=>s.trim()).filter(Boolean);
   if(!items.length)return;
-  $('st').innerHTML='<span class="spin"></span> 刮削中…';
-  $('out').innerHTML='';
+  $('st').innerHTML='<span class="spin"></span> 提交中…';
+  $('out').innerHTML='';LAST=[];RENDERED.clear();
   try{
     const r=await fetch('/api/scrape',{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify({items})});
-    const d=await r.json();LAST=d.results;
-    for(const it of d.results)render(it);
-    const ok=LAST.filter(x=>x.ok).length;
-    $('st').innerHTML='完成：<b class="ok">'+ok+'</b> 成功 / <b class="'+(LAST.length-ok?'err':'ok')+'">'+(LAST.length-ok)+'</b> 失败';
+    const d=await r.json();
+    if(d.error){$('st').innerHTML='<b class="err">'+esc(d.error)+'</b>';return}
+    CURJOB=d.job_id;
+    $('st').innerHTML='<span class="spin"></span> 刮削中 0/'+d.total+(d.dups?' · 去重 '+d.dups+' 条':'');
+    $('btnCancel').style.display='inline-flex';
+    poll();
   }catch(e){$('st').innerHTML='<b class="err">'+esc(String(e))+'</b>'}
-  await status()}
+}
+async function poll(){
+  if(!CURJOB)return;
+  try{
+    const j=await (await fetch('/api/job/'+CURJOB)).json();
+    for(const it of j.results){if(!RENDERED.has(it.idx)){RENDERED.add(it.idx);LAST.push(it);render(it)}}
+    if(j.state==='running'){
+      $('st').innerHTML='<span class="spin"></span> 刮削中 '+j.done+'/'+j.total
+        +' · <b class="ok">'+j.ok+'</b> 成功 · <b class="'+(j.fail?'err':'ok')+'">'+j.fail+'</b> 失败'
+        +(j.dups?' · 去重 '+j.dups+' 条':'');
+      POLLT=setTimeout(poll,700);return;
+    }
+    $('st').innerHTML=(j.state==='cancelled'?'<b class="err">已停止</b> · ':'完成：')
+      +'<b class="ok">'+j.ok+'</b> 成功 / <b class="'+(j.fail?'err':'ok')+'">'+j.fail+'</b> 失败'
+      +(j.dups?' · 去重 '+j.dups+' 条':'')+' · 用时 '+j.elapsed+'s';
+  }catch(e){$('st').innerHTML='<b class="err">'+esc(String(e))+'</b>'}
+  CURJOB=null;$('btnCancel').style.display='none';await status();
+}
+async function cancelJob(){if(CURJOB){await fetch('/api/job/'+CURJOB+'/cancel',{method:'POST'});
+  $('st').innerHTML='<span class="spin"></span> 停止中…'}}
 function render(it){
   const div=document.createElement('div');div.className='res '+(it.ok?'ok':'err');
   if(it.ok){const d=it.data;
@@ -283,7 +449,7 @@ function render(it){
      +'<div>'+pfs+'</div><div>'+tags+'</div>'
      +'<details><summary>详情 / JSON</summary><pre>'+esc(d.details||'')+'</pre><pre>'+esc(JSON.stringify(d,null,2))+'</pre></details>'
      +'</div>';}
-  else{div.innerHTML='<div class="body"><div class="t">失败</div><div class="meta">'+esc(it.input)+'</div><div class="meta">'+esc(it.error||'')+'</div></div>';}
+  else{div.innerHTML='<div class="body"><div class="t">失败'+(it.error&&it.error.indexOf('duplicate')===0?'（重复）':'')+'</div><div class="meta">'+esc(it.input)+'</div><div class="meta">'+esc(it.error||'')+'</div></div>';}
   $('out').appendChild(div)}
 function dlJson(){if(!LAST.length)return;const ok=LAST.filter(x=>x.ok).map(x=>x.data);
   const b=new Blob([JSON.stringify(ok,null,2)],{type:'application/json'});
@@ -318,7 +484,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(status_payload(cfg))
         elif self.path == "/api/config_view":
             self._json({k: cfg[k] for k in
-                        ("cc_url", "cc_key", "cc_password", "proxy")})
+                        ("cc_url", "cc_key", "cc_password", "proxy",
+                         "workers", "interval")})
+        elif self.path.startswith("/api/job/"):
+            job = JOBS.get(self.path.split("/")[3].split("/")[0])
+            if not job:
+                return self._json({"error": "no such job"}, 404)
+            self._json(job_payload(job))
         else:
             self._json({"error": "not found"}, 404)
 
@@ -333,6 +505,14 @@ class Handler(BaseHTTPRequestHandler):
             for k in ("cc_url", "cc_key", "cc_password", "proxy"):
                 if k in payload:
                     global_cfg[k] = str(payload.get(k) or "").strip()
+            for k in ("workers", "interval"):
+                if k in payload:
+                    try:
+                        v = float(payload[k])
+                    except (TypeError, ValueError):
+                        continue
+                    global_cfg[k] = (max(1, min(8, int(v))) if k == "workers"
+                                     else max(0.1, min(5.0, v)))
             save_config(global_cfg)
             apply_config(global_cfg)
             try:  # drop stale cookie cache from the old config
@@ -341,10 +521,20 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             return self._json({"ok": True})
         if self.path == "/api/scrape":
-            items = [str(x) for x in (payload.get("items") or [])][:200]
-            with _lock:  # serialize batches; shared session & cache
-                apply_config(global_cfg)
-                return self._json({"results": scrape_batch(items)})
+            items = [str(x) for x in (payload.get("items") or [])][:MAX_ITEMS]
+            apply_config(global_cfg)
+            job = start_job(items, global_cfg)
+            return self._json({"job_id": job["id"], "total": job["total"],
+                               "dups": job["dups"]})
+        if self.path.startswith("/api/job/"):
+            jid = self.path.split("/")[3].split("/")[0]
+            job = JOBS.get(jid)
+            if not job:
+                return self._json({"error": "no such job"}, 404)
+            if self.path.endswith("/cancel"):
+                job["cancel"] = True
+                return self._json({"ok": True})
+            return self._json(job_payload(job))
         if self.path == "/api/cache/clear":
             try:
                 os.remove(fantiajp.CC_CACHE)

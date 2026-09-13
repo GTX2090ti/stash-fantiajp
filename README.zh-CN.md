@@ -93,6 +93,8 @@ python webui.py          # 然后打开 http://127.0.0.1:8799
 功能：
 
 - 每行贴一条——帖子 URL / 纯数字 ID / `FANTIA-<id>` 文件名 → 批量刮削 → 结果卡片（封面、日期、标签、表演者、详情）→ 导出 JSON
+- **并发批量引擎**：1–8 个并发线程（默认 3），自适应限速——遇到 403/429/网络错误时请求间隔自动翻倍（上限 8 秒），连续成功 5 次后逐步回落；重复行在发出任何请求前就被识别并跳过
+- **实时进度**：结果边刮边显示（无需等整批结束）；任务可中途取消
 - **CookieCloud 与代理设置可直接在网页里修改**——不依赖环境变量。保存在脚本同目录的 `webui_config.json`（已 gitignore，不会离开本机），保存即热生效
 - Cookie 缓存状态展示 + 一键清除
 
@@ -138,6 +140,8 @@ docker run -d --name fantia-webui --restart unless-stopped --network host \
 |---|---|---|---|
 | `FANTIA_COOKIE` | 刮削器 | — | 原始会话 cookie（cookie 优先级最高） |
 | `FANTIA_DEBUG` | 刮削器 | 关闭 | `1` = 输出 stderr 诊断日志 |
+| `FANTIA_RETRIES` | 刮削器 | `2` | 瞬时失败（网络 / 429 / 5xx；403 仅一次）的额外重试次数 |
+| `FANTIA_BACKOFF` | 刮削器 | `1.0` | 重试基础间隔（秒），指数递增 |
 | `CC_COOKIECLOUD_URL` | 刮削器 | — | CookieCloud 基础地址 |
 | `CC_COOKIECLOUD_KEY` | 刮削器 | — | 设备密钥（UUID） |
 | `CC_COOKIECLOUD_PASSWORD` | 刮削器 | — | 同步密码 |
@@ -171,6 +175,7 @@ docker run -d --name fantia-webui --restart unless-stopped --network host \
 
 ## 更新日志
 
+- **2026-09-13 (2)** — 批量刮削优化：刮削核心对瞬时失败增加指数退避重试；WebUI 批量引擎重写——并发线程、自适应限速、实时进度 + 取消、重复行去重。
 - **2026-09-13** — 新增 WebUI（批量刮削、网页内 CookieCloud 设置、JSON 导出）；NAS Docker 部署指南；WebUI 在网页配置为空时继承刮削器内置默认值。
 - **2026-09-12** — 修复 dict 形状 `thumb`/`title` 字段导致的崩溃（即 `EOF` 问题）；全部字符串字段改用 `_s()` 容错取值；回归测试扩至 92 项断言。
 - **2026-09-11** — 首个 fragment 增强版：`sceneByFragment`/`galleryByFragment`、带 AES 兜底与 1 小时缓存的 CookieCloud 客户端。
