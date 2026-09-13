@@ -1,60 +1,106 @@
-# FantiaJp (fragment-capable build) — Stash scraper for fantia.jp
+# FantiaJp (fragment-capable build)
 
-A hardened, fragment-capable rewrite of the community [FantiaJp](https://github.com/stashapp/CommunityScrapers/tree/master/scrapers/FantiaJp) scraper for [Stash](https://github.com/stashapp/stash).
+A hardened, fragment-capable rewrite of the community [FantiaJp](https://github.com/stashapp/CommunityScrapers/tree/master/scrapers/FantiaJp) scraper for [Stash](https://github.com/stashapp/stash), plus an optional zero-dependency WebUI for batch scraping.
 
-**Highlights**
+## Contents
 
-- `sceneByFragment` / `galleryByFragment` — shows up in the **Scrape with…** menu (upstream is URL-only, so it never appears there) and works for batch scraping
-- Robust against Fantia's inconsistent post JSON — `thumb`/`title`-like fields are sometimes dicts, not strings, which crashes naive scrapers and surfaces in Stash as `could not unmarshal json from script output: EOF`
-- Fails softly: deleted / members-only / throttled posts return an empty result with a diagnostic, never a crashed process
-- Quiet by default — diagnostics go to stderr only with `FANTIA_DEBUG=1`
-- Optional login via, in priority order: `FANTIA_COOKIE` env → `fantia_cookie.txt` file → self-hosted **CookieCloud** server (fetched live, cached 1 h)
+- [What's different from upstream](#whats-different-from-upstream)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Login / cookie setup](#login--cookie-setup)
+- [Usage in Stash](#usage-in-stash)
+- [WebUI](#webui)
+- [Configuration reference](#configuration-reference)
+- [File layout](#file-layout)
+- [Troubleshooting](#troubleshooting)
+- [Changelog](#changelog)
+- [License](#license)
+
+## What's different from upstream
+
+| | Upstream FantiaJp | This build |
+|---|---|---|
+| `Scrape with…` menu | ✗ not listed (URL-only) | ✓ `sceneByFragment` / `galleryByFragment` |
+| Batch scraping | ✗ | ✓ (fragment → post ID resolution) |
+| Galleries | URL only | fragment entry included |
+| Malformed post JSON | crashes (Stash shows `EOF` error) | tolerated — dict-shaped `thumb`/`title` fields are drilled into |
+| Login | manual cookie file | env → file → **CookieCloud** (auto, 1 h cache) |
+| Failure behavior | crashed process, empty stdout | soft-fail with a diagnostic in the result |
+| WebUI | ✗ | ✓ optional, stdlib-only |
+
+## Requirements
+
+- Stash v0.28+ (tested on v0.31)
+- Python 3 with `requests` available to whatever environment launches Stash scrapers (`pip install requests`). Everything else is stdlib — the CookieCloud client ships a pure-Python AES fallback, no extra crypto packages.
 
 ## Install
 
-1. Copy `fantiajp.py` + `FantiaJp.yml` into your Stash scrapers path (default `~/.stash/scrapers/`), e.g. `scrapers/community/FantiaJp/`.
+1. Copy `fantiajp.py`, `FantiaJp.yml` and `manifest` into your Stash scrapers path, e.g. `~/.stash/scrapers/community/FantiaJp/`.
 2. In Stash: **Scrape with… → Reload scrapers**.
 
-Python `requests` is required inside the environment that runs Stash (`pip install requests`). Everything else is stdlib — the CookieCloud client ships a pure-Python AES fallback, no extra crypto packages needed.
-
-> ⚠️ If you installed the upstream FantiaJp through Stash's package manager, installing this over it may be reverted the next time Stash refreshes package sources. Delete the installed package first, or maintain this copy in a location not managed by `installPackages` (the background job re-extracts the official zip and silently overwrites manual edits).
+> ⚠️ **Package-manager conflict**: if you installed upstream FantiaJp through Stash's package manager, Stash's background `installPackages` job re-extracts the official zip and **silently overwrites manual edits**. Delete the managed package first, or keep this copy in a location not managed by `installPackages`. After installing, verify **Settings → Log** shows no overwrite and that `supported_scrapes` includes `FRAGMENT`.
 
 ## Login / cookie setup
 
-Fantia hides members-only posts; `/api/v1/posts/<id>` answers HTTP 422 for anything the session may not see (deleted, members-only, or not logged in — Fantia does not distinguish). The scraper tries, in order:
+Fantia hides members-only posts; `/api/v1/posts/<id>` answers HTTP 422 for anything the session may not see (deleted, members-only, or not logged in — Fantia does not distinguish). The scraper picks up a session cookie from, in priority order:
 
-1. `FANTIA_COOKIE` env var — a raw cookie string, e.g. `_session_id=...`
-2. `fantia_cookie.txt` next to the script (or in the Stash config dir) — raw cookie string or Netscape `cookies.txt` format
-3. **CookieCloud** (self-hosted) — set these env vars where the Stash server process runs (docker-compose `environment:`, systemd `Environment=`, etc.):
+| # | Source | How |
+|---|---|---|
+| 1 | `FANTIA_COOKIE` env var | raw cookie string, e.g. `_session_id=...` |
+| 2 | `fantia_cookie.txt` | next to the script or in the Stash config dir; raw cookie string or Netscape `cookies.txt` format |
+| 3 | **CookieCloud** (self-hosted) | see below; fetched live and cached for 1 h |
 
-   | Variable | Meaning |
-   |---|---|
-   | `CC_COOKIECLOUD_URL` | Base URL of your CookieCloud instance |
-   | `CC_COOKIECLOUD_KEY` | Device key (UUID) |
-   | `CC_COOKIECLOUD_PASSWORD` | Sync password |
-   | `CC_TIMEOUT` / `CC_TTL` | Optional: fetch timeout (s) and cache lifetime (s, default 3600) |
+CookieCloud setup — set these env vars where the Stash server process runs (docker-compose `environment:`, systemd `Environment=`, etc.), log into fantia.jp in a browser covered by CookieCloud's extension, sync once, and the scraper picks the cookie up automatically:
 
-   Log into fantia.jp in a browser covered by CookieCloud's browser extension, sync once, and the scraper picks the cookie up automatically.
+| Variable | Meaning |
+|---|---|
+| `CC_COOKIECLOUD_URL` | Base URL of your CookieCloud instance |
+| `CC_COOKIECLOUD_KEY` | Device key (UUID) |
+| `CC_COOKIECLOUD_PASSWORD` | Sync password |
 
 Without any cookie only genuinely public posts will scrape.
 
-## WebUI (optional)
+## Usage in Stash
 
-`webui.py` is a zero-dependency (stdlib-only) local front-end for batch scraping:
+**Single**: open a scene/gallery → **Scrape with… → FantiaJp**.
+
+**Batch**: multi-select scenes or galleries in the grid → **Scrape with… → FantiaJp** → review each preview → apply.
+
+**Identify task**: add FantiaJp as the only source under *Settings → Identify* to avoid unrelated fragment scrapers (duga, ThePornDB, …) firing 404 noise against Fantia file names.
+
+Post IDs are resolved from the fragment in this order:
+
+| Priority | Source | Example |
+|---|---|---|
+| 1 | Existing URL on the scene | `fantia.jp/posts/1180318` |
+| 2 | Previously scraped code field | `FANTIA-1180318` |
+| 3 | Digits in the filename/path | `fantia-976153.mp4` |
+
+Scenes matching none of these are skipped silently. Note that `fantia.jp/products/<id>` (shop pages) are **not** posts and yield no data — that is expected.
+
+Keep batches moderate (Fantia throttles aggressive request rates); each scene costs ~1–2 s. The CookieCloud cache means the cookie is fetched at most once per hour regardless of batch size.
+
+## WebUI
+
+`webui.py` is an optional local front-end for batch scraping, stdlib-only (no extra pip installs):
 
 ```
 python webui.py          # then open http://127.0.0.1:8799
 ```
 
-- Paste one URL / post id / `FANTIA-<id>` filename per line → batch scrape → result cards (cover, date, tags, performers, details) → export JSON
-- **CookieCloud & proxy settings are editable in the browser** — no env vars needed. They are stored in `webui_config.json` next to the script (gitignored, never leaves the machine) and applied hot. CookieCloud requests always bypass the proxy; the proxy only applies to fantia.jp traffic.
-- Cookie cache status + one-click clear.
+Features:
+
+- Paste one item per line — post URL / numeric ID / `FANTIA-<id>` filename → batch scrape → result cards (cover, date, tags, performers, details) → export JSON
+- **CookieCloud & proxy settings are editable in the browser** — no env vars needed. Saved to `webui_config.json` next to the script (gitignored, never leaves the machine) and applied hot
+- Cookie cache status + one-click clear
 
 `WEBUI_HOST` / `WEBUI_PORT` env vars override the bind address (default `127.0.0.1:8799`).
 
+Settings precedence (highest first): UI-saved `webui_config.json` → `fantiajp.py` env vars / baked-in defaults. CookieCloud requests always bypass the proxy; the proxy only applies to fantia.jp traffic.
+
 ### Run it next to your Stash (NAS / Docker)
 
-The WebUI can share the scraper directory with your Stash container — it then reuses the same `fantiajp.py`, cookie cache and (if present) baked-in defaults:
+The WebUI can share the scraper directory with your Stash container — it then reuses the same `fantiajp.py`, cookie cache and baked-in defaults with zero extra configuration:
 
 ```bash
 mkdir -p /vol2/docker/fantia-webui && cd /vol2/docker/fantia-webui
@@ -78,23 +124,54 @@ docker run -d --name fantia-webui --restart unless-stopped --network host \
 Then open `http://<nas-ip>:8799`. Notes:
 
 - `--network host` exposes 8799 on the LAN directly; keep the NAS off the public internet.
-- CookieCloud settings left empty in the UI fall back to whatever `fantiajp.py` itself carries (env vars or baked defaults), so a private build keeps working with zero UI configuration.
+- CookieCloud settings left empty in the UI fall back to whatever `fantiajp.py` itself carries, so a private build keeps working with zero UI configuration.
 - Settings saved in the UI land in `webui_config.json` inside the mounted scraper dir.
+- **Updating**: replace `webui.py` in the mounted dir → `docker restart fantia-webui` (no image rebuild needed).
 
-## Batch scraping in Stash
+## Configuration reference
 
-- **Scenes/Galleries**: multi-select in the grid → **Scrape with… → FantiaJp**.
-- Post IDs are resolved from the fragment in this order: existing `fantia.jp/posts/<id>` URL → previously scraped `FANTIA-<id>` code → digits in the filename. Scenes without any of these are skipped silently.
-- Keep batches moderate (Fantia throttles aggressive request rates). Each scene costs ~1–2 s.
+All env vars, read where the respective process runs:
+
+| Variable | Applies to | Default | Meaning |
+|---|---|---|---|
+| `FANTIA_COOKIE` | scraper | — | Raw session cookie (highest cookie priority) |
+| `FANTIA_DEBUG` | scraper | off | `1` = stderr diagnostics |
+| `CC_COOKIECLOUD_URL` | scraper | — | CookieCloud base URL |
+| `CC_COOKIECLOUD_KEY` | scraper | — | Device key (UUID) |
+| `CC_COOKIECLOUD_PASSWORD` | scraper | — | Sync password |
+| `CC_TIMEOUT` | scraper | `8` | CookieCloud fetch timeout (s) |
+| `CC_TTL` | scraper | `3600` | Cookie cache lifetime (s) |
+| `HTTPS_PROXY` / `HTTP_PROXY` | both | — | Proxy for fantia.jp (CookieCloud always bypasses it) |
+| `WEBUI_HOST` / `WEBUI_PORT` | WebUI | `127.0.0.1` / `8799` | Bind address |
+
+## File layout
+
+| File | Purpose |
+|---|---|
+| `fantiajp.py` | The scraper (Stash calls it as a script) |
+| `FantiaJp.yml` | Scraper definition — fragment entries included |
+| `manifest` | Package-manager metadata |
+| `webui.py` | Optional WebUI server |
+| `.fantia_cookiecc.json` | Cookie cache created at runtime (gitignored — contains real cookies) |
+| `fantia_cookie.txt` | Optional manual cookie file (gitignored) |
+| `webui_config.json` | WebUI settings created at runtime (gitignored) |
 
 ## Troubleshooting
 
-| Symptom | Meaning |
-|---|---|
-| `could not unmarshal json from script output: EOF` | The script crashed before printing JSON — check the traceback in **Settings → Logs** (Debug level). Fixed here for dict-shaped JSON; if you see it again, the log tells you exactly where. |
-| `HTTP 422 ... not visible to this session` | Cookie expired / not logged in / post deleted. Re-sync your cookie. |
-| `HTTP 403` | Invalid cookie or IP throttled — wait, or refresh the login. |
-| Scene silently not scraped | No post ID found in URL/code/filename. |
+| Symptom | Meaning | Fix |
+|---|---|---|
+| `could not unmarshal json from script output: EOF` | The script crashed before printing JSON | Check the traceback in **Settings → Logs** (set log level to Debug). Dict-shaped JSON is handled here; if you still see it, the log names the exact line |
+| `HTTP 422 ... not visible to this session` | Cookie expired / not logged in / post deleted — Fantia does not distinguish | Re-sync your cookie (CookieCloud sync or fresh `fantia_cookie.txt`) |
+| `HTTP 403` | Invalid cookie or IP throttled | Wait, or refresh the login |
+| Scene silently not scraped | No post ID found in URL/code/filename | Add a `fantia.jp/posts/<id>` URL or rename the file |
+| `duga.jp ... 404` in logs during Identify | Unrelated built-in scrapers probing the fragment | Limit Identify sources to FantiaJp (see [Usage](#usage-in-stash)) |
+| Overwritten back to upstream behavior | Stash `installPackages` re-extracted the official zip | See [Install](#install) warning |
+
+## Changelog
+
+- **2026-09-13** — WebUI added (batch scrape, in-browser CookieCloud settings, JSON export); NAS Docker deployment guide; WebUI inherits scraper's baked-in defaults when UI config is empty.
+- **2026-09-12** — Fixed crash on dict-shaped `thumb`/`title` fields (the `EOF` bug); `_s()` tolerant getter across all string fields; regression suite grown to 92 assertions.
+- **2026-09-11** — Initial fragment-capable build: `sceneByFragment`/`galleryByFragment`, CookieCloud client with AES fallback and 1 h cache.
 
 ## License
 
