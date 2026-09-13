@@ -1,5 +1,7 @@
 # FantiaJp (fragment-capable build)
 
+English | [简体中文](README.zh-CN.md)
+
 A hardened, fragment-capable rewrite of the community [FantiaJp](https://github.com/stashapp/CommunityScrapers/tree/master/scrapers/FantiaJp) scraper for [Stash](https://github.com/stashapp/stash), plus an optional zero-dependency WebUI for batch scraping.
 
 ## Contents
