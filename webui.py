@@ -116,20 +116,33 @@ def status_payload(cfg):
 RE_ID_ONLY = fantiajp.RE_BARE_ID
 
 
-def resolve_post_id(text):
+def resolve_target(text):
+    """Resolve input text to (kind, id); kind is "post" or "product"."""
     text = (text or "").strip()
     if not text:
         return None
     m = RE_ID_ONLY.match(text)
     if m:
-        return m.group(1)
+        return ("post", m.group(1))
+    m = fantiajp.RE_PRODUCT_IN_URL.search(text)
+    if m:
+        return ("product", m.group(1))
     m = fantiajp.RE_POST_IN_URL.search(text)
     if m:
-        return m.group(1)
+        return ("post", m.group(1))
+    m = fantiajp.RE_PRODUCT_CODE.search(text)
+    if m:
+        return ("product", m.group(1))
     m = fantiajp.RE_ID_IN_TEXT.search(text)
     if m and "fantia" in text.lower():
-        return m.group(1)
+        return ("post", m.group(1))
     return None
+
+
+def resolve_post_id(text):
+    """Legacy wrapper: return just the numeric id (post or product)."""
+    t = resolve_target(text)
+    return t[1] if t else None
 
 
 class RateLimiter:
@@ -187,18 +200,18 @@ MAX_ITEMS = 500
 
 
 def parse_items(items):
-    """Resolve lines -> [(raw, pid_or_None)]; dedupe post ids, keep order."""
+    """Resolve lines -> [(raw, target_or_None)]; dedupe targets, keep order."""
     seen, dups = set(), 0
     out = []
     for raw in items:
-        pid = resolve_post_id(raw)
-        if pid and pid in seen:
+        tgt = resolve_target(raw)
+        if tgt and tgt in seen:
             dups += 1
             out.append((raw, None, "duplicate of an earlier line, skipped"))
             continue
-        if pid:
-            seen.add(pid)
-        out.append((raw, pid, None))
+        if tgt:
+            seen.add(tgt)
+        out.append((raw, tgt, None))
     return out, dups
 
 
@@ -231,15 +244,19 @@ def run_job(job, parsed, cfg):
             tl.csrf = fantiajp.get_csrf(tl.sess)
         return tl.sess, tl.csrf
 
-    def one(idx, raw, pid):
+    def one(idx, raw, tgt):
         if job["cancel"]:
             return
+        kind, pid = tgt
         rec = {"idx": idx, "input": raw, "ok": False, "post_id": pid,
-               "error": None}
+               "kind": kind, "error": None}
         try:
             sess, csrf = get_sess()
             limiter.wait()
-            frag = fantiajp.scrape_id(pid, sess, [csrf])
+            if kind == "product":
+                frag = fantiajp.scrape_product_id(pid, sess)
+            else:
+                frag = fantiajp.scrape_id(pid, sess, [csrf])
             rec["ok"] = bool(frag)
             rec["data"] = frag
             rec["error"] = None if frag else \
@@ -261,15 +278,15 @@ def run_job(job, parsed, cfg):
             job["fail"] += 1
 
     # pre-fill non-resolvable lines so progress counts them immediately
-    for idx, (raw, pid, err) in enumerate(parsed):
-        if err or not pid:
+    for idx, (raw, tgt, err) in enumerate(parsed):
+        if err or not tgt:
             job["results"][idx] = {"idx": idx, "input": raw, "ok": False,
                                    "post_id": None, "error":
-                                   err or "no fantia post id found"}
+                                   err or "no fantia post/product id found"}
     job["done"] = sum(1 for r in job["results"] if r is not None)
     job["fail"] = job["done"]
 
-    todo = [(i, raw, pid) for i, (raw, pid, _e) in enumerate(parsed) if pid]
+    todo = [(i, raw, tgt) for i, (raw, tgt, _e) in enumerate(parsed) if tgt]
     if todo:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futs = [pool.submit(one, i, raw, pid) for i, raw, pid in todo]
@@ -357,7 +374,7 @@ border-top-color:transparent;border-radius:50%;animation:sp .8s linear infinite}
 
 <div class="card">
 <h2><svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>刮削输入</h2>
-<textarea id="inp" placeholder="每行一个：帖子 URL、纯数字 ID 或含 ID 的文件名&#10;https://fantia.jp/posts/1180318&#10;1180318&#10;FANTIA-976153.mp4"></textarea>
+<textarea id="inp" placeholder="每行一个：帖子/商品 URL、纯数字 ID 或含 ID 的文件名&#10;https://fantia.jp/posts/1180318&#10;https://fantia.jp/products/1035222&#10;1180318&#10;FANTIA-976153.mp4"></textarea>
 <div class="row">
 <button onclick="go()"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>开始刮削</button>
 <button class="ghost" id="btnCancel" style="display:none" onclick="cancelJob()"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.4" fill="none"/></svg>停止</button>

@@ -3,6 +3,7 @@ sceneByURL:
   - action: script
     url:
       - fantia.jp/posts/
+      - fantia.jp/products/
     script:
       - python
       - fantiajp.py
@@ -30,4 +31,4 @@ galleryByFragment:
     - python
     - fantiajp.py
     - galleryByFragment
-# Last Updated September 12, 2026 (fragment support + CookieCloud)
+# Last Updated September 14, 2026 (products page support)

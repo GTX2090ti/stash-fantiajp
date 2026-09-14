@@ -23,7 +23,8 @@
 | | 上游 FantiaJp | 本版本 |
 |---|---|---|
 | `Scrape with…` 菜单 | ✗ 不显示（仅支持 URL） | ✓ 含 `sceneByFragment` / `galleryByFragment` |
-| 批量刮削 | ✗ | ✓（fragment → 帖子 ID 解析） |
+| 批量刮削 | ✗ | ✓（fragment → 帖子/商品 ID 解析） |
+| 商品页（`/products/<id>`） | ✗ | ✓ 标题/封面/日期/作者/标签/详情 |
 | Gallery（图库） | 仅 URL | 含 fragment 入口 |
 | 畸形帖子 JSON | 崩溃（Stash 报 `EOF` 错误） | 容错处理——dict 形状的 `thumb`/`title` 字段自动下钻取值 |
 | 登录方式 | 手动 cookie 文件 | 环境变量 → 文件 → **CookieCloud**（自动拉取，缓存 1 小时） |
@@ -70,15 +71,18 @@ CookieCloud 配置——在运行 Stash 服务进程的位置设置这些环境�
 
 **Identify 任务**：在 *Settings → Identify* 中把 FantiaJp 设为唯一来源，避免其他支持 fragment 的刮削器（duga、ThePornDB 等）拿着 Fantia 文件名去查询产生 404 噪音日志。
 
-fragment 中的帖子 ID 按以下优先级解析：
+fragment 中的帖子/商品 ID 按以下优先级解析：
 
 | 优先级 | 来源 | 示例 |
 |---|---|---|
-| 1 | 场景已有的 URL | `fantia.jp/posts/1180318` |
-| 2 | 之前刮过的 code 字段 | `FANTIA-1180318` |
-| 3 | 文件名/路径中的数字 | `fantia-976153.mp4` |
+| 1 | 场景已有的商品 URL | `fantia.jp/products/1035222` |
+| 2 | 场景已有的帖子 URL | `fantia.jp/posts/1180318` |
+| 3 | 之前刮过的 code 字段 | `FANTIA-1180318` / `FANTIA-P1035222` |
+| 4 | 文件名/路径中的数字 | `fantia-976153.mp4`（按帖子处理） |
 
-三者都不匹配的场景会被静默跳过。注意 `fantia.jp/products/<id>`（商品页）**不是**帖子，不会刮出数据——这是预期行为。
+都不匹配的场景会被静默跳过。
+
+**商品页**（`fantia.jp/products/<id>`，商店商品）自 2026-09-14 起支持。商品没有 JSON API，刮削器直接读取页面内嵌的结构化数据：JSON-LD（`name`、图片列表、`VideoObject.uploadDate`）、`gtm-json` 块（`fanclub_name`、标签）和 `product-description` 段落（完整描述）。商品场景的 code 为 `FANTIA-P<id>`，与帖子 ID 区分。
 
 批量请适度（Fantia 会对高频请求限流）；每个场景耗时约 1–2 秒。CookieCloud 有 1 小时缓存，无论批量多大，cookie 至多每小时拉取一次。
 
@@ -92,7 +96,7 @@ python webui.py          # 然后打开 http://127.0.0.1:8799
 
 功能：
 
-- 每行贴一条——帖子 URL / 纯数字 ID / `FANTIA-<id>` 文件名 → 批量刮削 → 结果卡片（封面、日期、标签、表演者、详情）→ 导出 JSON
+- 每行贴一条——帖子/商品 URL / 纯数字 ID / `FANTIA-<id>` 或 `FANTIA-P<id>` 文件名 → 批量刮削 → 结果卡片（封面、日期、标签、表演者、详情）→ 导出 JSON
 - **并发批量引擎**：1–8 个并发线程（默认 3），自适应限速——遇到 403/429/网络错误时请求间隔自动翻倍（上限 8 秒），连续成功 5 次后逐步回落；重复行在发出任何请求前就被识别并跳过
 - **实时进度**：结果边刮边显示（无需等整批结束）；任务可中途取消
 - **CookieCloud 与代理设置可直接在网页里修改**——不依赖环境变量。保存在脚本同目录的 `webui_config.json`（已 gitignore，不会离开本机），保存即热生效
@@ -174,6 +178,8 @@ docker run -d --name fantia-webui --restart unless-stopped --network host \
 | 行为被改回上游原样 | Stash `installPackages` 重新解压了官方 zip | 见[安装](#安装)的警告 |
 
 ## 更新日志
+
+- **2026-09-14** — 商品页支持：`fantia.jp/products/<id>` 可刮削（标题、封面、日期、作者、标签、完整描述，数据来自 JSON-LD + `gtm-json` + 描述段落）；商品场景 code 为 `FANTIA-P<id>`；`sceneByURL` 接受商品 URL；WebUI 识别商品 URL/Code。
 
 - **2026-09-13 (2)** — 批量刮削优化：刮削核心对瞬时失败增加指数退避重试；WebUI 批量引擎重写——并发线程、自适应限速、实时进度 + 取消、重复行去重。
 - **2026-09-13** — 新增 WebUI（批量刮削、网页内 CookieCloud 设置、JSON 导出）；NAS Docker 部署指南；WebUI 在网页配置为空时继承刮削器内置默认值。

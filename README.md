@@ -23,7 +23,8 @@ A hardened, fragment-capable rewrite of the community [FantiaJp](https://github.
 | | Upstream FantiaJp | This build |
 |---|---|---|
 | `Scrape with…` menu | ✗ not listed (URL-only) | ✓ `sceneByFragment` / `galleryByFragment` |
-| Batch scraping | ✗ | ✓ (fragment → post ID resolution) |
+| Batch scraping | ✗ | ✓ (fragment → post/product ID resolution) |
+| Products (`/products/<id>`) | ✗ | ✓ title/cover/date/creator/tags/details |
 | Galleries | URL only | fragment entry included |
 | Malformed post JSON | crashes (Stash shows `EOF` error) | tolerated — dict-shaped `thumb`/`title` fields are drilled into |
 | Login | manual cookie file | env → file → **CookieCloud** (auto, 1 h cache) |
@@ -70,15 +71,18 @@ Without any cookie only genuinely public posts will scrape.
 
 **Identify task**: add FantiaJp as the only source under *Settings → Identify* to avoid unrelated fragment scrapers (duga, ThePornDB, …) firing 404 noise against Fantia file names.
 
-Post IDs are resolved from the fragment in this order:
+Post and product IDs are resolved from the fragment in this order:
 
 | Priority | Source | Example |
 |---|---|---|
-| 1 | Existing URL on the scene | `fantia.jp/posts/1180318` |
-| 2 | Previously scraped code field | `FANTIA-1180318` |
-| 3 | Digits in the filename/path | `fantia-976153.mp4` |
+| 1 | Existing product URL on the scene | `fantia.jp/products/1035222` |
+| 2 | Existing post URL on the scene | `fantia.jp/posts/1180318` |
+| 3 | Previously scraped code field | `FANTIA-1180318` / `FANTIA-P1035222` |
+| 4 | Digits in the filename/path | `fantia-976153.mp4` (treated as a post) |
 
-Scenes matching none of these are skipped silently. Note that `fantia.jp/products/<id>` (shop pages) are **not** posts and yield no data — that is expected.
+Scenes matching none of these are skipped silently.
+
+**Products** (`fantia.jp/products/<id>`, shop items) are supported since 2026-09-14. There is no JSON API for products, so the scraper reads the page's embedded structured data: JSON-LD (`name`, image list, `VideoObject.uploadDate`), the `gtm-json` block (`fanclub_name`, tags) and the `product-description` section (full text). Product scenes get code `FANTIA-P<id>` to stay distinguishable from post ids.
 
 Keep batches moderate (Fantia throttles aggressive request rates); each scene costs ~1–2 s. The CookieCloud cache means the cookie is fetched at most once per hour regardless of batch size.
 
@@ -92,7 +96,7 @@ python webui.py          # then open http://127.0.0.1:8799
 
 Features:
 
-- Paste one item per line — post URL / numeric ID / `FANTIA-<id>` filename → batch scrape → result cards (cover, date, tags, performers, details) → export JSON
+- Paste one item per line — post/product URL / numeric ID / `FANTIA-<id>` or `FANTIA-P<id>` filename → batch scrape → result cards (cover, date, tags, performers, details) → export JSON
 - **Concurrent batch engine**: 1–8 workers (default 3) with adaptive rate limiting — the request interval doubles on 403/429/network errors (cap 8 s) and decays back after 5 consecutive successes; duplicates are detected and skipped before any request fires
 - **Live progress**: results stream in as they complete (no waiting for the whole batch); jobs can be cancelled mid-run
 - **CookieCloud & proxy settings are editable in the browser** — no env vars needed. Saved to `webui_config.json` next to the script (gitignored, never leaves the machine) and applied hot
@@ -174,6 +178,8 @@ All env vars, read where the respective process runs:
 | Overwritten back to upstream behavior | Stash `installPackages` re-extracted the official zip | See [Install](#install) warning |
 
 ## Changelog
+
+- **2026-09-14** — Product page support: `fantia.jp/products/<id>` URLs now scrape (title, cover, date, creator, tags, full description via JSON-LD + `gtm-json` + description section); product scenes carry code `FANTIA-P<id>`; `sceneByURL` accepts products; WebUI resolves product URLs/codes.
 
 - **2026-09-13 (2)** — Batch scraping optimization: retry with exponential backoff for transient failures in the scraper core; WebUI batch engine rewritten — concurrent workers, adaptive rate limiting, live progress + cancel, duplicate-line dedup.
 - **2026-09-13** — WebUI added (batch scrape, in-browser CookieCloud settings, JSON export); NAS Docker deployment guide; WebUI inherits scraper's baked-in defaults when UI config is empty.

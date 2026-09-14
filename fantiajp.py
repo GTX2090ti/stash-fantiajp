@@ -52,6 +52,7 @@ Debug: set ``FANTIA_DEBUG=1`` to get stderr traces.
 """
 
 import hashlib
+import html as html_mod
 import json
 import os
 import random
@@ -87,14 +88,46 @@ BACKOFF = float(os.environ.get("FANTIA_BACKOFF", "1.0"))  # seconds, exponential
 BASE = "https://fantia.jp"
 POST_URL = BASE + "/posts/%s"
 API_URL = BASE + "/api/v1/posts/%s"
+PRODUCT_URL = BASE + "/products/%s"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
 
 RE_POST_IN_URL = re.compile(r"fantia\.jp/posts/(\d+)", re.I)
+RE_PRODUCT_IN_URL = re.compile(r"fantia\.jp/products/(\d+)", re.I)
+# Product scenes carry code FANTIA-P<id>; the P keeps them distinguishable
+# from post ids when only the code survives on a scene.
+RE_PRODUCT_CODE = re.compile(r"FANTIA-P(\d{5,})", re.I)
 RE_ID_IN_TEXT = re.compile(r"(?:FANTIA[-_ ]?)?(\d{5,})", re.I)
 RE_BARE_ID = re.compile(r"^\s*(\d{5,})\s*$")
 RE_CSRF = re.compile(r'name=["\']csrf-token["\']\s+content=["\']([^"\']+)', re.I)
+# Products pages ship structured data instead of a JSON API:
+#   * class="gtm-json" blocks -- fanclub_name, tag[], content_id
+#   * one application/ld+json block -- Product (name, image[], brand) and
+#     VideoObject (uploadDate)
+#   * <div class="product-description"> -- full, untruncated description
+RE_GTM_JSON = re.compile(
+    r'<script[^>]*class="[^"]*gtm-json[^"]*"[^>]*>(.*?)</script', re.S)
+RE_JSON_LD = re.compile(
+    r'<script type="application/ld\+json">\s*(\[.*?\])\s*</script>', re.S)
+
+
+def _product_description(page):
+    """Full product description text.
+
+    Structure: <div class="product-description"><h3 ...>heading</h3>
+    <div class="mb-30"> ... </div></div>.  Capture from after the heading
+    until the section closes or the next <h3, capped for safety.
+    """
+    i = page.find("product-description")
+    if i == -1:
+        return ""
+    h3 = page.find("</h3>", i)
+    start = h3 + 5 if h3 != -1 else i
+    rest = page[start:start + 12000]
+    ends = [x for x in (rest.find("</div></div>"), rest.find("<h3"))
+            if x != -1]
+    return _strip_html(rest[:min(ends)] if ends else rest)
 # Netscape cookies.txt: domain \t flag \t path \t secure \t expiry \t name \t value
 RE_COOKIE_LINE = re.compile(
     r"^\s*([^\s#][^\t]*?)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t"
@@ -638,12 +671,16 @@ def build(post, post_id):
 
 
 def scrape_url(url, sess, csrf_holder):
-    """Scrape by post URL. `csrf_holder` is a 1-item list so we fetch once."""
-    m = RE_POST_IN_URL.search(url or "")
-    if not m:
-        dbg("no post id in %r" % url)
-        return {}
-    return scrape_id(m.group(1), sess, csrf_holder)
+    """Scrape by post or product URL. `csrf_holder` is a 1-item list."""
+    url = url or ""
+    m = RE_POST_IN_URL.search(url)
+    if m:
+        return scrape_id(m.group(1), sess, csrf_holder)
+    m = RE_PRODUCT_IN_URL.search(url)
+    if m:
+        return scrape_product_id(m.group(1), sess)
+    dbg("no post/product id in %r" % url)
+    return {}
 
 
 def scrape_id(post_id, sess, csrf_holder):
@@ -660,6 +697,151 @@ def scrape_id(post_id, sess, csrf_holder):
 
 
 # --------------------------------------------------------------------------- #
+# Products (fantia.jp/products/<id>) -- HTML scraping, there is no JSON API
+# --------------------------------------------------------------------------- #
+def _strip_html(fragment):
+    """HTML -> plain text, keeping line structure of <p> and <br>."""
+    txt = re.sub(r"(?i)<br\s*/?>", "\n", fragment)
+    txt = re.sub(r"(?i)</p\s*>", "\n", txt)
+    txt = re.sub(r"<[^>]+>", "", txt)
+    txt = html_mod.unescape(txt)
+    lines = [ln.strip() for ln in txt.splitlines()]
+    out, blank = [], False
+    for ln in lines:
+        if ln:
+            out.append(ln)
+            blank = False
+        elif not blank and out:
+            out.append("")
+            blank = True
+    return "\n".join(out).strip()
+
+
+def parse_product(page):
+    """Extract a product fragment dict from the /products/<id> HTML page."""
+    gtm = {}
+    for m in RE_GTM_JSON.finditer(page):
+        try:
+            data = json.loads(m.group(1).strip())
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("content_type") == "product":
+            gtm = data
+            break
+    ld_product, ld_video = {}, {}
+    for m in RE_JSON_LD.finditer(page):
+        try:
+            arr = json.loads(m.group(1))
+        except ValueError:
+            continue
+        if not isinstance(arr, list):
+            arr = [arr]
+        for item in arr:
+            if not isinstance(item, dict):
+                continue
+            if item.get("@type") == "Product" and item.get("image"):
+                ld_product = item
+            elif item.get("@type") == "VideoObject":
+                ld_video = item
+
+    title = _s(ld_product.get("name")) or _s(gtm.get("content_title"))
+    if not title:
+        return None
+
+    image = ""
+    for u in ld_product.get("image") or []:
+        if isinstance(u, str) and u.strip():
+            # micro_ thumbnails embed the full-size URL, same trick as posts
+            image = u.replace("micro_", "") if "micro_" in u else u
+            break
+
+    date = _s(ld_video.get("uploadDate"))[:10]
+
+    details = _product_description(page)
+    if not details:
+        details = _s(ld_product.get("description"))
+
+    performers = []
+    creator = _s(gtm.get("fanclub_name"))
+    if creator:
+        performers.append({"name": creator})
+
+    tags = [{"name": _s(t)} for t in gtm.get("tag") or [] if _s(t)]
+
+    return {
+        "title": title,
+        "details": details,
+        "date": date,
+        "image": image,
+        "performers": performers,
+        "tags": tags,
+    }
+
+
+def fetch_product(sess, product_id):
+    """GET the /products/<id> page. Returns (html|None, message)."""
+    url = PRODUCT_URL % product_id
+    attempts = 1 + max(0, RETRIES)
+    last = "unreachable"
+    for attempt in range(attempts):
+        if attempt:
+            delay = BACKOFF * (2 ** (attempt - 1)) + random.uniform(0, 0.4)
+            dbg("retry %d/%d for product %s in %.1fs (%s)"
+                % (attempt, RETRIES, product_id, delay, last))
+            time.sleep(delay)
+        try:
+            r = sess.get(url, timeout=15, verify=False)
+        except requests.RequestException as e:
+            last = "request failed: %s" % e
+            continue
+        if r.status_code == 404 or r.status_code == 410:
+            return None, "HTTP %s: product %s does not exist" % (
+                r.status_code, product_id)
+        if r.status_code == 403:
+            if attempt == 0:
+                last = "HTTP 403: blocked (invalid cookie or IP throttled)"
+                continue
+            return None, last
+        if r.status_code == 429 or r.status_code >= 500:
+            last = "HTTP %s" % r.status_code
+            continue
+        if r.status_code != 200:
+            return None, "HTTP %s" % r.status_code
+        return r.text, ""
+    return None, last
+
+
+def build_product(pdata, product_id):
+    out = {
+        "title": pdata.get("title") or "",
+        "code": "FANTIA-P%s" % product_id,
+        "details": pdata.get("details") or "",
+        "urls": [PRODUCT_URL % product_id],
+        "date": pdata.get("date") or "",
+        "image": pdata.get("image") or "",
+        "studio": {"name": "Fantia.jp"},
+        "performers": pdata.get("performers") or [],
+        "tags": pdata.get("tags") or [],
+    }
+    return {k: v for k, v in out.items() if v}
+
+
+def scrape_product_id(product_id, sess):
+    t0 = time.time()
+    page, msg = fetch_product(sess, product_id)
+    if page is None:
+        warn("product %s: %s" % (product_id, msg))
+        return {}
+    pdata = parse_product(page)
+    if pdata is None:
+        warn("product %s: page contained no product data" % product_id)
+        return {}
+    frag = build_product(pdata, product_id)
+    dbg("scraped product %r in %.2fs" % (frag.get("title"), time.time() - t0))
+    return frag
+
+
+# --------------------------------------------------------------------------- #
 # Fragment -> post id (no network)
 # --------------------------------------------------------------------------- #
 def _stem(path):
@@ -668,24 +850,37 @@ def _stem(path):
 
 
 def post_id_from_payload(payload):
-    """Resolve a post id locally; a hit means ONE request instead of a search."""
-    # 1) a fantia URL already on the scene
+    """Resolve (kind, id) locally; kind is "post" or "product".
+
+    A hit means ONE request instead of a search.
+    """
+    # 1) a fantia URL already on the scene -- product first (disjoint patterns)
     for u in list(payload.get("urls") or []) + [payload.get("url") or ""]:
+        m = RE_PRODUCT_IN_URL.search(u or "")
+        if m:
+            return "product", m.group(1)
         m = RE_POST_IN_URL.search(u or "")
         if m:
-            return m.group(1)
+            return "post", m.group(1)
     # 2) our own code field (Stash feeds it back on re-scrapes)
     code = (payload.get("code") or "").strip()
     if code:
+        m = RE_PRODUCT_CODE.search(code)
+        if m:
+            return "product", m.group(1)
         m = RE_ID_IN_TEXT.search(code)
         if m:
-            return m.group(1)
-    # 3) id embedded in the filename, e.g. "FANTIA-1234567.mp4"
+            return "post", m.group(1)
+    # 3) id embedded in the filename, e.g. "FANTIA-1234567.mp4" or
+    #    "FANTIA-P1035222.mp4"
     fname = payload.get("filename") or payload.get("path") or ""
     if fname:
+        m = RE_PRODUCT_CODE.search(_stem(fname))
+        if m:
+            return "product", m.group(1)
         m = RE_ID_IN_TEXT.search(_stem(fname))
         if m:
-            return m.group(1)
+            return "post", m.group(1)
     # 4) bare id used as the whole filename stem or title -- files ripped from
     #    Fantia are often named "12345678.mp4".  Weak signal, but a wrong guess
     #    only costs one request: nothing parses, so main() echoes the fragment
@@ -693,8 +888,8 @@ def post_id_from_payload(payload):
     for cand in (_stem(fname), (payload.get("title") or "").strip()):
         m = RE_BARE_ID.match(cand or "")
         if m:
-            return m.group(1)
-    return ""
+            return "post", m.group(1)
+    return "", ""
 
 
 # --------------------------------------------------------------------------- #
@@ -720,10 +915,14 @@ def main():
         url = (payload.get("url") or "").strip()
         frag = scrape_url(url, sess, csrf_holder) if url else {}
     else:  # *,ByFragment
-        post_id = post_id_from_payload(payload)
+        kind, post_id = post_id_from_payload(payload)
         if post_id:
-            dbg("fragment resolved from local id (no search): %s" % post_id)
-            frag = scrape_id(post_id, sess, csrf_holder)
+            dbg("fragment resolved from local id (no search): %s %s"
+                % (kind, post_id))
+            if kind == "product":
+                frag = scrape_product_id(post_id, sess)
+            else:
+                frag = scrape_id(post_id, sess, csrf_holder)
         else:
             dbg("no post id could be resolved from the fragment input")
             frag = {}
