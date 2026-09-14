@@ -106,7 +106,34 @@ python webui.py          # 然后打开 http://127.0.0.1:8799
 
 设置优先级（从高到低）：网页保存的 `webui_config.json` → `fantiajp.py` 的环境变量 / 内置默认值。CookieCloud 请求始终绕过代理；代理仅作用于 fantia.jp 的流量。
 
-### 与 Stash 同机部署（NAS / Docker）
+### Docker（仓库自带镜像）
+
+仓库内置 `Dockerfile` 和 `docker-compose.yml`——镜像内包含 `webui.py` + `fantiajp.py`，唯一依赖是 `requests`（国内构建可加 `--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` 加速）：
+
+```bash
+git clone https://github.com/GTX2090ti/stash-fantiajp.git
+cd stash-fantiajp
+
+# 方式一：compose（先修改 docker-compose.yml 里的 CC_COOKIECLOUD_*）
+docker compose up -d
+
+# 方式二：直接 docker
+docker build -t fantia-webui:latest .
+docker run -d --name fantia-webui --restart unless-stopped -p 8799:8799 \
+  -e CC_COOKIECLOUD_URL=http://your-cookiecloud:8188 \
+  -e CC_COOKIECLOUD_KEY=<你的key-uuid> \
+  -e CC_COOKIECLOUD_PASSWORD=<你的同步密码> \
+  -v /path/to/data:/data \
+  fantia-webui:latest
+```
+
+然后打开 `http://<主机IP>:8799`。注意事项：
+
+- `/data`（务必挂载！）存放 `webui_config.json` 和 CookieCloud cookie 缓存，容器重建后设置与 cookie 不丢（路径由 `WEBUI_CONFIG_DIR` / `CC_CACHE_DIR` 控制）。
+- CookieCloud 也可以事后在 WebUI 设置页里填写——环境变量只是预填默认值。
+- 镜像自带 healthcheck，每分钟探测一次 `/api/status`。
+
+### 与 Stash 同机部署（NAS / 共享刮削器目录）
 
 WebUI 可以与 Stash 容器共享刮削器目录——从而复用同一个 `fantiajp.py`、cookie 缓存和内置默认值，零额外配置：
 
@@ -153,6 +180,8 @@ docker run -d --name fantia-webui --restart unless-stopped --network host \
 | `CC_TTL` | 刮削器 | `3600` | Cookie 缓存有效期（秒） |
 | `HTTPS_PROXY` / `HTTP_PROXY` | 两者 | — | fantia.jp 使用的代理（CookieCloud 始终绕过） |
 | `WEBUI_HOST` / `WEBUI_PORT` | WebUI | `127.0.0.1` / `8799` | 监听地址 |
+| `WEBUI_CONFIG_DIR` | WebUI | 脚本所在目录 | `webui_config.json` 存放目录（Docker 中为 `/data`） |
+| `CC_CACHE_DIR` | 刮削器 | 脚本所在目录 | CookieCloud cookie 缓存写入目录（Docker 中为 `/data`） |
 
 ## 文件清单
 
@@ -162,6 +191,8 @@ docker run -d --name fantia-webui --restart unless-stopped --network host \
 | `FantiaJp.yml` | 刮削器定义——含 fragment 入口 |
 | `manifest` | 包管理器元数据 |
 | `webui.py` | 可选的 WebUI 服务 |
+| `Dockerfile` / `docker-compose.yml` | WebUI 容器镜像（唯一依赖 requests） |
+| `index.yml` / `FantiaJp.zip` | Stash 包源文件，用于链接安装 |
 | `.fantia_cookiecc.json` | 运行时生成的 cookie 缓存（已 gitignore——含真实 cookie） |
 | `fantia_cookie.txt` | 可选的手动 cookie 文件（已 gitignore） |
 | `webui_config.json` | 运行时生成的 WebUI 设置（已 gitignore） |
@@ -178,6 +209,8 @@ docker run -d --name fantia-webui --restart unless-stopped --network host \
 | 行为被改回上游原样 | Stash `installPackages` 重新解压了官方 zip | 见[安装](#安装)的警告 |
 
 ## 更新日志
+
+- **2026-09-15** — Docker 打包：WebUI 附带 `Dockerfile` + `docker-compose.yml`（精简镜像，`/data` 持久化卷，新增 `WEBUI_CONFIG_DIR`/`CC_CACHE_DIR` 环境变量，healthcheck，pip 源可切换 build-arg）；新增 Stash 包源（`index.yml` + `FantiaJp.zip`）支持链接安装；刮削器新增 `CC_CACHE_DIR` 环境变量。
 
 - **2026-09-14** — 商品页支持：`fantia.jp/products/<id>` 可刮削（标题、封面、日期、作者、标签、完整描述，数据来自 JSON-LD + `gtm-json` + 描述段落）；商品场景 code 为 `FANTIA-P<id>`；`sceneByURL` 接受商品 URL；WebUI 识别商品 URL/Code。
 

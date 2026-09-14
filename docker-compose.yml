@@ -1,0 +1,18 @@
+services:
+  fantia-webui:
+    build: .
+    image: fantia-webui:latest
+    container_name: fantia-webui
+    restart: unless-stopped
+    ports:
+      - "8799:8799"
+    environment:
+      # CookieCloud (also configurable later in the WebUI settings page)
+      - CC_COOKIECLOUD_URL=http://192.168.2.210:8188
+      - CC_COOKIECLOUD_KEY=your-key-uuid
+      - CC_COOKIECLOUD_PASSWORD=your-password
+      # HTTP proxy for reaching fantia.jp (optional; empty = direct)
+      # - HTTPS_PROXY=http://192.168.2.210:7890
+    volumes:
+      # persists webui_config.json + cookie cache
+      - ./data:/data

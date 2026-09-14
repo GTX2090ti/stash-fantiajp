@@ -106,7 +106,34 @@ Features:
 
 Settings precedence (highest first): UI-saved `webui_config.json` → `fantiajp.py` env vars / baked-in defaults. CookieCloud requests always bypass the proxy; the proxy only applies to fantia.jp traffic.
 
-### Run it next to your Stash (NAS / Docker)
+### Docker (bundled image)
+
+This repository ships a `Dockerfile` and `docker-compose.yml` — the image contains `webui.py` + `fantiajp.py`, its only dependency is `requests` (use `--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` for faster builds in China):
+
+```bash
+git clone https://github.com/GTX2090ti/stash-fantiajp.git
+cd stash-fantiajp
+
+# option A: compose (edit CC_COOKIECLOUD_* in docker-compose.yml first)
+docker compose up -d
+
+# option B: plain docker
+docker build -t fantia-webui:latest .
+docker run -d --name fantia-webui --restart unless-stopped -p 8799:8799 \
+  -e CC_COOKIECLOUD_URL=http://your-cookiecloud:8188 \
+  -e CC_COOKIECLOUD_KEY=<your-key-uuid> \
+  -e CC_COOKIECLOUD_PASSWORD=<your-password> \
+  -v /path/to/data:/data \
+  fantia-webui:latest
+```
+
+Then open `http://<host>:8799`. Notes:
+
+- `/data` (mount it!) holds `webui_config.json` and the CookieCloud cookie cache, so settings and the cached cookie survive container recreation (`WEBUI_CONFIG_DIR` / `CC_CACHE_DIR` control the paths).
+- CookieCloud settings can also be entered later in the WebUI settings page — env vars just pre-fill the defaults.
+- A healthcheck pings `/api/status` every minute.
+
+### Run it next to your Stash (NAS / shared scraper dir)
 
 The WebUI can share the scraper directory with your Stash container — it then reuses the same `fantiajp.py`, cookie cache and baked-in defaults with zero extra configuration:
 
@@ -153,6 +180,8 @@ All env vars, read where the respective process runs:
 | `CC_TTL` | scraper | `3600` | Cookie cache lifetime (s) |
 | `HTTPS_PROXY` / `HTTP_PROXY` | both | — | Proxy for fantia.jp (CookieCloud always bypasses it) |
 | `WEBUI_HOST` / `WEBUI_PORT` | WebUI | `127.0.0.1` / `8799` | Bind address |
+| `WEBUI_CONFIG_DIR` | WebUI | script dir | Where `webui_config.json` is stored (Docker: `/data`) |
+| `CC_CACHE_DIR` | scraper | script dir | Where the CookieCloud cookie cache is written (Docker: `/data`) |
 
 ## File layout
 
@@ -162,6 +191,8 @@ All env vars, read where the respective process runs:
 | `FantiaJp.yml` | Scraper definition — fragment entries included |
 | `manifest` | Package-manager metadata |
 | `webui.py` | Optional WebUI server |
+| `Dockerfile` / `docker-compose.yml` | WebUI container image (only dep: requests) |
+| `index.yml` / `FantiaJp.zip` | Stash package-source files for install-via-URL |
 | `.fantia_cookiecc.json` | Cookie cache created at runtime (gitignored — contains real cookies) |
 | `fantia_cookie.txt` | Optional manual cookie file (gitignored) |
 | `webui_config.json` | WebUI settings created at runtime (gitignored) |
@@ -178,6 +209,8 @@ All env vars, read where the respective process runs:
 | Overwritten back to upstream behavior | Stash `installPackages` re-extracted the official zip | See [Install](#install) warning |
 
 ## Changelog
+
+- **2026-09-15** — Docker packaging: `Dockerfile` + `docker-compose.yml` for the WebUI (minimal image, persistent `/data` volume via new `WEBUI_CONFIG_DIR`/`CC_CACHE_DIR` env vars, healthcheck, pip index build-arg); Stash package source (`index.yml` + `FantiaJp.zip`) for install-via-URL; `CC_CACHE_DIR` env var added to the scraper.
 
 - **2026-09-14** — Product page support: `fantia.jp/products/<id>` URLs now scrape (title, cover, date, creator, tags, full description via JSON-LD + `gtm-json` + description section); product scenes carry code `FANTIA-P<id>`; `sceneByURL` accepts products; WebUI resolves product URLs/codes.
 

@@ -145,7 +145,8 @@ CC_PASSWORD = os.environ.get("CC_COOKIECLOUD_PASSWORD", "")
 CC_DOMAIN = "fantia.jp"
 CC_TIMEOUT = float(os.environ.get("CC_TIMEOUT", "8"))
 CC_TTL = int(os.environ.get("CC_TTL", "3600"))  # seconds the cache stays fresh
-CC_CACHE = os.path.join(HERE, ".fantia_cookiecc.json")
+CC_CACHE = os.path.join(
+    os.environ.get("CC_CACHE_DIR") or HERE, ".fantia_cookiecc.json")
 
 # Keys Stash accepts in a scraped scene/gallery result.  Stash hands us its own
 # update fragment (which carries `id`, `files`, ...); echoing those back logs

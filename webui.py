@@ -38,7 +38,8 @@ sys.path.insert(0, HERE)
 
 import fantiajp  # noqa: E402  (same directory)
 
-CONFIG_FILE = os.path.join(HERE, "webui_config.json")
+CONFIG_FILE = os.path.join(
+    os.environ.get("WEBUI_CONFIG_DIR") or HERE, "webui_config.json")
 
 DEFAULTS = {
     "cc_url": "",
